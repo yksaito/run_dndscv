@@ -54,6 +54,7 @@ dndscv/
 │   ├── manifest/
 │   ├── manifest_lists/
 │   ├── merged_mutation/
+│   ├── merged_mutation_drivers/
 │   ├── dndscv_lists/
 │   └── dndscv/
 ├── log/
@@ -66,12 +67,14 @@ dndscv/
 │   │   ├── make_manifest.R
 │   │   ├── merge_mutation_for_dndscv.R
 │   │   ├── merge_mutation.R
+│   │   ├── merge_mutation_drivers.R
 │   │   ├── run_dndscv.R
 │   │   └── merge_sel_cv.R
 │   ├── merge_mutation.sh
 │   └── run_dndscv.sh
 ├── run_preparation.sh
 ├── submit_merge_mutation.sh
+├── submit_merge_mutation_drivers.sh
 └── submit_run_dndscv.sh
 ```
 
@@ -88,6 +91,7 @@ dndscv/
 | 2b. 確認用統合 | 同上 | 全ANNOVAR列を保持したまま染色体別に統合 | `output/merged_mutation/*_by_chr/*.txt` |
 | 3. dNdScv | Stage 2の5列ファイル | `dndscv()`を実行 | `output/dndscv/sel_cv_*.csv`、`dndsCV_*.xlsx` |
 | 4. 候補統合 | `output/dndscv/sel_cv_*.csv` | cohort列を追加し、指定条件でpositive selection候補を抽出 | `output/dndscv/sel_cv_merged_pos_selection.csv` |
+| 5. Driver変異統合 | manifest、`sel_cv_<cohort>.csv`、ANNOVAR変異 | `qglobal_cv < 0.1`の遺伝子に該当する変異を抽出 | `output/merged_mutation_drivers/*_merged_mutation_drivers.txt` |
 
 ---
 
@@ -324,6 +328,17 @@ REFDB=RefCDS_human_GRCh38.p12_dNdScv.0.1.0.rda \
 - job名は`run_dndscv`、ログ出力先は`log/dndscv/`である。
 - 1 task内のBLAS等のthread数を1へ制限する。
 
+### 完了済みcohortのskip
+
+各cohortについて、次の2ファイルが両方とも非空で存在する場合だけ完了済みと判定し、array input listから除外する。
+
+```text
+output/dndscv/sel_cv_<cohort>.csv
+output/dndscv/dndsCV_<cohort>.xlsx
+```
+
+片方だけ存在する場合、またはいずれかが0 byteの場合は不完全出力としてsubmissionを停止する。全cohortが完了済みならqsubせず正常終了する。作成されるinput listには未完了cohortだけが含まれる。
+
 input listの例：
 
 ```text
@@ -482,6 +497,45 @@ output/dndscv/sel_cv_merged_pos_selection.csv
 
 ---
 
+## 9b. Stage 5: qglobal_cvで有意な遺伝子の変異統合
+
+### 実行
+
+```bash
+# log/merge_drv/は事前に作成する
+bash submit_merge_mutation_drivers.sh CODE
+```
+
+`CODE`以外のcategoryも、既存のmerge処理と同様に指定できる。manifest 1ファイルをarray jobの1 taskへ割り当て、既存workerの`src/merge_mutation.sh`から`src/R/merge_mutation_drivers.R`を実行する。job名は`merge_drv`、ログ出力先は`log/merge_drv/`である。`submit_merge_mutation.sh`は変更せず、この処理専用のwrapperを使用する。
+
+### 入力
+
+- `output/manifest/<cohort>_manifest.txt`
+- `output/dndscv/sel_cv_<cohort>.csv`
+- `/home/nh1sy/analysis/wgs/3_mutation/pon_filtering/output/annovar_filtered/<CODE>/<sample>.filtered.hg38_multianno.txt.gz`
+
+### 遺伝子の選択と照合
+
+1. `sel_cv_<cohort>.csv`から`qglobal_cv < 0.1`の行を選ぶ。
+2. `CDKN2A.p14arf`および`CDKN2A.p16INK4a`は、ANNOVARとの照合時に`CDKN2A`へ変換する。
+3. ANNOVARの`Gene.ensGene`を`;`または`,`で分割し、遺伝子名を完全一致で照合する。
+4. `chr1`～`chr22`、`chrX`、`chrY`だけを出力する。
+5. ANNOVARの全列を保持し、先頭に`sampleID`と`driver_gene`を追加する。
+
+manifest内の変異ファイル、cohortに対応する`sel_cv`、または必須列が欠けている場合は停止し、自動skipしない。
+
+### 出力
+
+```text
+output/merged_mutation_drivers/<cohort>_merged_mutation_drivers.txt
+output/merged_mutation_drivers/<cohort>_significant_genes_qglobal_lt_0_1.tsv
+output/merged_mutation_drivers/<cohort>_significant_genes_not_in_ensGene.tsv
+```
+
+1つ目はdriver変異の統合TSV、2つ目は`qglobal_cv < 0.1`の全遺伝子とensGene照合名、3つ目はcohort内の全ANNOVAR入力の`Gene.ensGene`に一度も現れなかった有意遺伝子である。該当遺伝子が0件でも、3つ目はヘッダー付きで出力する。
+
+---
+
 ## 10. 推奨実行順序
 
 通常のCODE単位解析は以下の順で実行する。
@@ -505,6 +559,10 @@ bash submit_run_dndscv.sh CODE
 
 # 4. Positive selection候補の統合
 Rscript src/R/merge_sel_cv.R
+
+# 5. qglobal_cv < 0.1の遺伝子に該当する変異を統合
+# log/merge_drv/は事前に作成する
+bash submit_merge_mutation_drivers.sh CODE
 ```
 
 確認用に全ANNOVAR列も統合する場合だけ、別途以下を実行する。
@@ -514,7 +572,7 @@ mkdir -p log/merge_mut
 bash submit_merge_mutation.sh merge CODE
 ```
 
-`submit_merge_mutation.sh`と`submit_run_dndscv.sh`は、listおよび当該jobのlog directoryを現行実装内で作成する。一方、`run_preparation.sh`は`log/prep/`を作成しないため、初回実行前に用意する。
+`submit_merge_mutation_drivers.sh`はlist directoryだけを作成し、log directoryは作成しないため、`log/merge_drv/`を初回実行前に用意する。
 
 ---
 

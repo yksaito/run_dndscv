@@ -3,7 +3,7 @@ library(tidyverse)
 # -----------------------------------------------------------------------------
 # Settings
 # -----------------------------------------------------------------------------
-input_file <- "input/merged_sample_sheet3.csv"
+input_file <- "input/merged_sample_sheet4_primary_sample_only.csv"
 output_dir <- "output/manifest"
 minimum_cases <- 30
 
