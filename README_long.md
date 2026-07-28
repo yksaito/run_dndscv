@@ -1,17 +1,18 @@
-# dNdScv解析パイプライン詳細
+# dNdScv解析パイプライン詳細（version 1.2）
 
 ## 1. 目的
 
 本パイプラインは、population filter後のANNOVAR注釈済み変異ファイルをがん種・疾患階層ごとに統合し、dNdScvによる遺伝子単位のpositive selection解析を実施するためのものである。
 
-主な処理は次の4段階である。
+主な処理は次の5段階である。
 
 1. サンプルシートから解析cohortごとのmanifestを作成する。
 2. manifestに含まれる症例の変異をdNdScv入力形式へ統合する。
 3. cohortごとにdNdScvを実行する。
 4. 各cohortの`sel_cv`を統合し、positive selection候補遺伝子を抽出する。
+5. `q_driver < 0.1`の遺伝子に該当する変異を、cohort・解析種別ごとに統合する。
 
-通常は`CODE`単位、すなわちがん種ごとにarray jobを投入する。
+通常は`CODE`単位、すなわちがん種ごとにarray jobを投入する。version 1.2では、`CODE`および`level1`～`level5`の全categoryについて通常解析とMSI-H除外解析を作成し、変異統合とdNdScvは両解析を別々のarray jobへ投入する。
 
 ---
 
@@ -49,7 +50,7 @@ R packageが別のR 4.4.xでbuildされていたという警告や、`translate`
 ```text
 dndscv/
 ├── input/
-│   └── merged_sample_sheet3.csv
+│   └── merged_sample_sheet4_primary_sample_only.csv
 ├── output/
 │   ├── manifest/
 │   ├── manifest_lists/
@@ -58,9 +59,9 @@ dndscv/
 │   ├── dndscv_lists/
 │   └── dndscv/
 ├── log/
-│   ├── prep/
-│   ├── merge_dnd/
-│   ├── merge_mut/
+│   ├── manifest/
+│   ├── merge_mutation/
+│   ├── merge_drv/
 │   └── dndscv/
 ├── src/
 │   ├── R/
@@ -86,12 +87,12 @@ dndscv/
 
 | Stage | 主な入力 | 実施内容 | 主な出力 |
 |---|---|---|---|
-| 1. Manifest | `input/merged_sample_sheet3.csv` | cohortごとの症例一覧を作成 | `output/manifest/*_manifest.txt` |
+| 1. Manifest | `input/merged_sample_sheet4_primary_sample_only.csv` | cohortごとの症例一覧を作成。全categoryで通常解析とMSI-H除外解析の2種類を作成 | `output/manifest/*_manifest.txt` |
 | 2. dNdScv用統合 | population filter後の`*.filtered.hg38_multianno.txt.gz`とmanifest | 症例IDを付加し、必要な5列へ変換してcohort単位で統合 | `output/merged_mutation/*_merged_mutation_for_dndscv.txt` |
 | 2b. 確認用統合 | 同上 | 全ANNOVAR列を保持したまま染色体別に統合 | `output/merged_mutation/*_by_chr/*.txt` |
 | 3. dNdScv | Stage 2の5列ファイル | `dndscv()`を実行 | `output/dndscv/sel_cv_*.csv`、`dndsCV_*.xlsx` |
 | 4. 候補統合 | `output/dndscv/sel_cv_*.csv` | cohort列を追加し、指定条件でpositive selection候補を抽出 | `output/dndscv/sel_cv_merged_pos_selection.csv` |
-| 5. Driver変異統合 | manifest、`sel_cv_<cohort>.csv`、ANNOVAR変異 | `qglobal_cv < 0.1`の遺伝子に該当する変異を抽出 | `output/merged_mutation_drivers/*_merged_mutation_drivers.txt` |
+| 5. Driver変異統合 | cohort manifest、`sel_cv_<cohort>.csv`、ANNOVAR変異 | `q_driver < 0.1`の遺伝子に該当する変異をcohort・解析種別ごとに統合 | cohortごとの通常版3ファイル、MSI-H除外版3ファイル |
 
 ---
 
@@ -105,12 +106,12 @@ dndscv/
 bash run_preparation.sh
 ```
 
-`run_preparation.sh`はR 4.4.0をloadし、`src/R/make_manifest.R`を実行する。SGE resourceは`s_vmem=8G`、ログ出力先は`log/prep/`である。`log/prep/`は事前に作成しておく。
+`run_preparation.sh`はR 4.4.0をloadし、`src/R/make_manifest.R`を実行する。SGE resourceは`s_vmem=8G`、SGEとして投入する場合のログ出力先は`log/manifest/`である。`log/manifest/`は事前に作成しておく。
 
 ### 入力
 
 ```text
-input/merged_sample_sheet3.csv
+input/merged_sample_sheet4_primary_sample_only.csv
 ```
 
 使用する主な列：
@@ -122,6 +123,7 @@ input/merged_sample_sheet3.csv
 | `parabricks` | 解析対象症例の確認 |
 | `tumor_bam` | 解析対象症例の確認 |
 | `cancer_description_en` | CODE manifestから除外する特殊群の判定 |
+| `MSI_status` | 全categoryのMSI-H除外解析で、`MSI-H`症例を除外するために使用 |
 | `level_1`～`level_5` | 疾患階層別manifestの作成 |
 
 最初に、`parabricks`、`tumor_bam`、`tumor_sample_name`が欠損している行と、`tumor_sample_name`が空の行を除外する。
@@ -134,11 +136,17 @@ input/merged_sample_sheet3.csv
 - 最低症例数による除外は行わない。
 - `cancer_description_en`が欠損している行を除外する。
 - `cancer_description_en`が`reduction_team`または`patient_return`の行を除外する。
+- 同じCODEについて、MSI statusによらない通常manifestと、末尾が`_MSIHexcluded`のmanifestを作成する。
+- `_MSIHexcluded`では、前後空白を除いた`MSI_status`が明示的に`MSI-H`である症例だけを除外する。
+- `MSI_status`が欠損、空欄、または`MSI-H`以外の症例は`_MSIHexcluded`にも残す。
+- 再実行時には全categoryの既存`*_MSIHexcluded_manifest.txt`を一度削除して作り直し、現在のsample sheetと一致しない古いMSI-H除外manifestを残さない。
 
 #### level 1～5
 
 - `level_1`から`level_5`の各値ごとに作成する。
-- uniqueな`tumor_sample_name`が30症例以上のgroupだけを出力する。
+- 通常manifestと、明示的なMSI-H症例だけを除いた`_MSIHexcluded` manifestを作成する。
+- uniqueな`tumor_sample_name`が30症例以上のgroupだけを出力する。この30例基準は通常版とMSI-H除外版で独立に判定する。
+- 例えば通常版が35例でも、MSI-H除外後が29例なら通常manifestのみを出力する。
 
 ファイル名に使用できない記号と空白は`_`へ置換される。
 
@@ -146,9 +154,12 @@ input/merged_sample_sheet3.csv
 
 ```text
 output/manifest/CODE_<group>_manifest.txt
+output/manifest/CODE_<group>_MSIHexcluded_manifest.txt
 output/manifest/level1_<group>_manifest.txt
+output/manifest/level1_<group>_MSIHexcluded_manifest.txt
 ...
 output/manifest/level5_<group>_manifest.txt
+output/manifest/level5_<group>_MSIHexcluded_manifest.txt
 ```
 
 拡張子は`.txt`だが、内容はヘッダー付きcomma-separated形式である。
@@ -161,6 +172,8 @@ sample_002,AM
 
 同じ`tumor_sample_name`と`CODE`の完全重複は除外し、`tumor_sample_name`順に並べる。
 
+例として、`CODE_AB_manifest.txt`はMSI statusによらないAB全対象症例、`CODE_AB_MSIHexcluded_manifest.txt`はそのうち明示的なMSI-H症例を除外した症例集合である。level manifestも同じ2種類を作成する。MSI-H除外後に出力基準を満たさないgroupについては、空manifestを作成しない。
+
 ---
 
 ## 6. Stage 2: dNdScv用変異ファイルの統合
@@ -172,6 +185,8 @@ sample_002,AM
 ```bash
 bash submit_merge_mutation.sh dndscv CODE
 ```
+
+同じコマンドで各がん種の通常解析とMSI-H除外解析を処理するが、両者は別々のmanifest listと別々のSGE array jobとして投入される。
 
 複数階層を指定する場合：
 
@@ -190,16 +205,19 @@ MAX_CONCURRENT=5 bash submit_merge_mutation.sh dndscv CODE
 ### Array jobの構成
 
 - `submit_merge_mutation.sh`が対象manifestを列挙する。
-- manifest listを`output/manifest_lists/`へ出力する。
+- 通常版とMSI-H除外版のmanifest listを`output/manifest_lists/`へ別々に出力する。
 - manifest 1ファイルをSGE array jobの1 taskへ割り当てる。
 - worker名は`src/merge_mutation.sh`である。
 - R script名は`src/R/merge_mutation_for_dndscv.R`である。
-- job名は`merge_dnd`、ログ出力先は`log/merge_dnd/`である。
+- job名は通常版`prep_dnds_norm`、MSI-H除外版`prep_dnds_msi`、ログ出力先は`log/merge_mutation/`である。
+
+`dndscv` modeでは`<cohort>_merged_mutation_for_dndscv.txt`が非空なら完了済みとしてskipする。`merge` modeではchr1～chr22、chrX、chrYの24ファイルがすべて非空の場合だけ完了済みとしてskipする。出力の一部だけが存在する場合や0 byte出力がある場合は、不完全出力としてqsub前に停止する。通常版とMSI-H除外版の両方を検証してから、いずれかのqsubを実行する。
 
 manifest listの例：
 
 ```text
-output/manifest_lists/dndscv_CODE_YYYYMMDD_HHMMSS.txt
+output/manifest_lists/dndscv_CODE_normal_YYYYMMDD_HHMMSS.txt
+output/manifest_lists/dndscv_CODE_MSIHexcluded_YYYYMMDD_HHMMSS.txt
 ```
 
 ### 入力変異ファイル
@@ -207,7 +225,7 @@ output/manifest_lists/dndscv_CODE_YYYYMMDD_HHMMSS.txt
 各manifest行について、次のファイルを参照する。
 
 ```text
-/home/nh1sy/analysis/wgs/3_mutation/pon_filtering/output/annovar_filtered/<CODE>/<tumor_sample_name>.filtered.hg38_multianno.txt.gz
+/home/nh1sy/analysis/wgs/3_mutation/pon_filtering/output/final/<CODE>/<tumor_sample_name>.filtered.hg38_multianno.txt.gz
 ```
 
 必要なANNOVAR列は以下である。
@@ -246,6 +264,7 @@ output/merged_mutation/<manifest_id>_merged_mutation_for_dndscv.txt
 
 ```text
 output/merged_mutation/CODE_AM_merged_mutation_for_dndscv.txt
+output/merged_mutation/CODE_AM_MSIHexcluded_merged_mutation_for_dndscv.txt
 ```
 
 出力はヘッダー付きtab-separated形式である。
@@ -273,7 +292,7 @@ bash submit_merge_mutation.sh merge CODE
 
 - worker名は`src/merge_mutation.sh`のまま使用する。
 - R scriptは`src/R/merge_mutation.R`を使用する。
-- job名は`merge_mut`、ログ出力先は`log/merge_mut/`である。
+- job名は通常版`merge_mut_norm`、MSI-H除外版`merge_mut_msi`、ログ出力先は`log/merge_mutation/`である。
 - ANNOVARの全列を保持する。
 - `Chr`が`1`、`chr1`、`X`、`chrX`などのいずれでも判定できるよう、一時的な正規化列を作る。
 - `chr1`～`chr22`、`chrX`、`chrY`だけを対象とする。
@@ -303,6 +322,8 @@ output/merged_mutation/<manifest_id>_by_chr/
 bash submit_run_dndscv.sh CODE
 ```
 
+Stage 2と同様に、通常cohortと`_MSIHexcluded` cohortの両方が対象になる。両者は独立したanalysis IDを持ち、別々のinput list・別々のarray job・別々の完了済みskip判定を持つ。
+
 categoryを省略した場合は、`CODE level1 level2 level3 level4 level5`をすべて対象とする。
 
 同時実行task数のdefaultは2である。
@@ -321,11 +342,11 @@ REFDB=RefCDS_human_GRCh38.p12_dNdScv.0.1.0.rda \
 ### Array jobの構成
 
 - `submit_run_dndscv.sh`が指定categoryの統合変異ファイルを列挙する。
-- input listを`output/dndscv_lists/`へ出力する。
+- 通常版とMSI-H除外版のinput listを`output/dndscv_lists/`へ別々に出力する。
 - cohortの統合変異ファイル1つをSGE array jobの1 taskへ割り当てる。
 - worker名は`src/run_dndscv.sh`である。
 - R script名は`src/R/run_dndscv.R`である。
-- job名は`run_dndscv`、ログ出力先は`log/dndscv/`である。
+- job名は通常版`run_dnds_norm`、MSI-H除外版`run_dnds_msi`、ログ出力先は`log/dndscv/`である。
 - 1 task内のBLAS等のthread数を1へ制限する。
 
 ### 完了済みcohortのskip
@@ -342,7 +363,8 @@ output/dndscv/dndsCV_<cohort>.xlsx
 input listの例：
 
 ```text
-output/dndscv_lists/dndscv_CODE_YYYYMMDD_HHMMSS.txt
+output/dndscv_lists/dndscv_CODE_normal_YYYYMMDD_HHMMSS.txt
+output/dndscv_lists/dndscv_CODE_MSIHexcluded_YYYYMMDD_HHMMSS.txt
 ```
 
 ### 入力
@@ -441,11 +463,10 @@ output/dndscv/sel_cv_*.csv
 各ファイルには少なくとも次の列が必要である。
 
 ```text
-wmis_cv, wnon_cv, wspl_cv, wind_cv,
-qtrunc_cv, qind_cv, qglobal_cv
+wmis_cv, wnon_cv, wspl_cv, qtrunc_cv, qallsubs_cv
 ```
 
-必要列が1つでも欠けているファイルがあれば停止する。
+indel modelが実行されたcohortでは、さらに`wind_cv`、`qind_cv`、`qglobal_cv`が存在する。`qglobal_cv`が存在する場合は`q_driver = qglobal_cv`、存在しない場合は`q_driver = qallsubs_cv`とし、採用した列名を`q_driver_source`へ記録する。必須列が欠けているファイル、または`qglobal_cv`とindel関連列の構成が矛盾するファイルがあれば停止する。
 
 ### cohort列
 
@@ -468,24 +489,26 @@ wspl_cv > 1 |
 wind_cv > 1
 ```
 
+indel modelが実行されていないcohortでは`wind_cv`が存在しないため、substitutionの3列だけで判定する。
+
 #### 2. いずれかの統計検定でFDR 10%未満
 
 ```r
 qtrunc_cv < 0.1 |
 qind_cv < 0.1 |
-qglobal_cv < 0.1
+q_driver < 0.1
 ```
 
 実際のfilterは次のとおりである。
 
 ```r
 (wmis_cv > 1 | wnon_cv > 1 | wspl_cv > 1 | wind_cv > 1) &
-  (qtrunc_cv < 0.1 | qind_cv < 0.1 | qglobal_cv < 0.1)
+  (qtrunc_cv < 0.1 | qind_cv < 0.1 | q_driver < 0.1)
 ```
 
-これは`qglobal_cv < 0.1`だけに限定するより広い候補集合である。truncating mutationまたはindelの検定だけで有意な遺伝子も残し、後の解釈・確認に利用できるようにしている。最終報告でglobal testだけを採用する場合は、この統合結果からさらに`qglobal_cv < 0.1`で絞り込む。
+これは`q_driver < 0.1`だけに限定するより広い候補集合である。truncating mutationまたはindelの検定だけで有意な遺伝子も残し、後の解釈・確認に利用できるようにしている。最終報告でglobal testだけを採用する場合は、この統合結果からさらに`q_driver < 0.1`で絞り込む。
 
-結果は`cohort`、`qglobal_cv`、`gene_name`の順に並べる。
+結果は`cohort`、`q_driver`、`gene_name`の順に並べる。
 
 ### 出力
 
@@ -493,11 +516,11 @@ qglobal_cv < 0.1
 output/dndscv/sel_cv_merged_pos_selection.csv
 ```
 
-出力には、追加した`cohort`列と、元の`sel_cv`の全列を保持する。
+出力には、追加した`analysis_type`、`cohort`、`q_driver`、`q_driver_source`列と、元の`sel_cv`の全列を保持する。`analysis_type`は`normal`または`MSIHexcluded`であり、通常cohortと`_MSIHexcluded` cohortを明示的に区別する。
 
 ---
 
-## 9b. Stage 5: qglobal_cvで有意な遺伝子の変異統合
+## 9b. Stage 5: q_driverで有意な遺伝子の変異統合
 
 ### 実行
 
@@ -506,17 +529,20 @@ output/dndscv/sel_cv_merged_pos_selection.csv
 bash submit_merge_mutation_drivers.sh CODE
 ```
 
-`CODE`以外のcategoryも、既存のmerge処理と同様に指定できる。manifest 1ファイルをarray jobの1 taskへ割り当て、既存workerの`src/merge_mutation.sh`から`src/R/merge_mutation_drivers.R`を実行する。job名は`merge_drv`、ログ出力先は`log/merge_drv/`である。`submit_merge_mutation.sh`は変更せず、この処理専用のwrapperを使用する。
+指定categoryのmanifestをarray input listへ登録し、共通worker `src/merge_mutation.sh`から`src/R/merge_mutation_drivers.R`をmanifest引数付きで実行する。通常版とMSI-H除外版は別々のtaskであり、初回実行では対象cohort数×2 taskとなる。job名は`merge_drv`、ログ出力先は`log/merge_drv/`、defaultの同時実行上限は20 taskである。
+
+categoryは`CODE`、`level1`～`level5`から指定できる。省略時は全categoryを対象とする。各解析種別のmanifestが実際に作成されているcohortだけが対象になる。
 
 ### 入力
 
 - `output/manifest/<cohort>_manifest.txt`
-- `output/dndscv/sel_cv_<cohort>.csv`
-- `/home/nh1sy/analysis/wgs/3_mutation/pon_filtering/output/annovar_filtered/<CODE>/<sample>.filtered.hg38_multianno.txt.gz`
+- `output/manifest/<cohort>_MSIHexcluded_manifest.txt`
+- 対応する`output/dndscv/sel_cv_<cohort>.csv`または`sel_cv_<cohort>_MSIHexcluded.csv`
+- `/home/nh1sy/analysis/wgs/3_mutation/pon_filtering/output/final/<CODE>/<sample>.filtered.hg38_multianno.txt.gz`
 
 ### 遺伝子の選択と照合
 
-1. `sel_cv_<cohort>.csv`から`qglobal_cv < 0.1`の行を選ぶ。
+1. `sel_cv_<cohort>.csv`に`qglobal_cv`があれば同列、なければ`qallsubs_cv`を`q_driver`として、`q_driver < 0.1`の行を選ぶ。
 2. `CDKN2A.p14arf`および`CDKN2A.p16INK4a`は、ANNOVARとの照合時に`CDKN2A`へ変換する。
 3. ANNOVARの`Gene.ensGene`を`;`または`,`で分割し、遺伝子名を完全一致で照合する。
 4. `chr1`～`chr22`、`chrX`、`chrY`だけを出力する。
@@ -528,11 +554,17 @@ manifest内の変異ファイル、cohortに対応する`sel_cv`、または必�
 
 ```text
 output/merged_mutation_drivers/<cohort>_merged_mutation_drivers.txt
-output/merged_mutation_drivers/<cohort>_significant_genes_qglobal_lt_0_1.tsv
+output/merged_mutation_drivers/<cohort>_significant_genes_q_driver_lt_0_1.tsv
 output/merged_mutation_drivers/<cohort>_significant_genes_not_in_ensGene.tsv
+
+output/merged_mutation_drivers/<cohort>_merged_mutation_drivers_MSIHexcluded.txt
+output/merged_mutation_drivers/<cohort>_significant_genes_q_driver_lt_0_1_MSIHexcluded.tsv
+output/merged_mutation_drivers/<cohort>_significant_genes_not_in_ensGene_MSIHexcluded.tsv
 ```
 
-1つ目はdriver変異の統合TSV、2つ目は`qglobal_cv < 0.1`の全遺伝子とensGene照合名、3つ目はcohort内の全ANNOVAR入力の`Gene.ensGene`に一度も現れなかった有意遺伝子である。該当遺伝子が0件でも、3つ目はヘッダー付きで出力する。
+各taskは3ファイルを1つの完了bundleとして作成する。`*_merged_mutation_drivers*.txt`は該当ANNOVAR変異、`*_significant_genes_q_driver_lt_0_1*.tsv`は採用した有意遺伝子、`*_significant_genes_not_in_ensGene*.tsv`は当該cohortの`Gene.ensGene`に一度も現れなかった有意遺伝子である。有意遺伝子または未照合遺伝子が0件でもヘッダー付きファイルを作成する。
+
+各taskについて3ファイルがすべて非空なら完了済みとしてarray input listから除外する。3ファイルの一部だけが存在する、またはいずれかが0 byteなら不完全bundleとして、いずれのqsubも行う前に停止する。対応する`sel_cv`がない、または0 byteの場合も同様に停止する。
 
 ---
 
@@ -542,7 +574,7 @@ output/merged_mutation_drivers/<cohort>_significant_genes_not_in_ensGene.tsv
 
 ```bash
 # 事前に必要なlog directoryを用意する
-mkdir -p log/prep log/merge_dnd log/dndscv
+mkdir -p log/manifest log/merge_mutation log/dndscv log/merge_drv
 
 # 1. Manifest
 bash run_preparation.sh
@@ -550,17 +582,17 @@ bash run_preparation.sh
 # 2. dNdScv用変異統合
 bash submit_merge_mutation.sh dndscv CODE
 
-# merge_dnd array jobの完了を確認する
+# prep_dnds_normとprep_dnds_msiの完了を確認する
 
 # 3. dNdScv
 bash submit_run_dndscv.sh CODE
 
-# run_dndscv array jobの完了を確認する
+# run_dnds_normとrun_dnds_msiの完了を確認する
 
 # 4. Positive selection候補の統合
 Rscript src/R/merge_sel_cv.R
 
-# 5. qglobal_cv < 0.1の遺伝子に該当する変異を統合
+# 5. q_driver < 0.1の遺伝子に該当する変異を統合
 # log/merge_drv/は事前に作成する
 bash submit_merge_mutation_drivers.sh CODE
 ```
@@ -568,11 +600,11 @@ bash submit_merge_mutation_drivers.sh CODE
 確認用に全ANNOVAR列も統合する場合だけ、別途以下を実行する。
 
 ```bash
-mkdir -p log/merge_mut
+mkdir -p log/merge_mutation
 bash submit_merge_mutation.sh merge CODE
 ```
 
-`submit_merge_mutation_drivers.sh`はlist directoryだけを作成し、log directoryは作成しないため、`log/merge_drv/`を初回実行前に用意する。
+`submit_merge_mutation_drivers.sh`はlog directoryを作成しないため、`log/merge_drv/`を初回実行前に用意する。
 
 ---
 
@@ -589,6 +621,8 @@ bash submit_merge_mutation.sh merge CODE
 | 入力validation後に変異が0件 | dNdScv taskを停止する |
 | `dndsout$sel_cv`がない | 出力処理を停止する |
 | `sel_cv`に統合用必須列がない | Stage 4を停止する |
+| Driver抽出対象の`sel_cv`がない、または0 byte | Driver arrayをqsubする前に停止する |
+| Driver抽出の3出力が一部だけ存在、またはいずれかが0 byte | 不完全bundleとしてDriver arrayをqsubする前に停止する |
 | memory allocation error | 1 taskあたりの`s_vmem`を増やして再投入する |
 
 dNdScvから隣接変異に関する警告が出た場合は、DNV/MNVがSNVへ分割されていないかを確認する。異なるsampleID間で同一変異が観察されたという警告は、既知のhotspotでは起こり得るが、件数が極端に多い場合は症例重複や上流のartifactを確認する。
@@ -597,7 +631,7 @@ dNdScvから隣接変異に関する警告が出た場合は、DNV/MNVがSNVへ�
 
 ## 12. 最終成果物
 
-解析の主要成果物は次の3種類である。
+解析の主要成果物は次の4種類である。
 
 1. cohort別のgene-level selection結果
 
@@ -617,7 +651,17 @@ dNdScvから隣接変異に関する警告が出た場合は、DNV/MNVがSNVへ�
    output/dndscv/sel_cv_merged_pos_selection.csv
    ```
 
-最終候補をglobal testで限定する場合は、3のファイルに対して`qglobal_cv < 0.1`を追加適用する。
+4. cohort・解析種別ごとの有意driver遺伝子、未照合遺伝子、該当ANNOVAR変異
+
+   ```text
+   output/merged_mutation_drivers/<cohort>_merged_mutation_drivers[_MSIHexcluded].txt
+   output/merged_mutation_drivers/<cohort>_significant_genes_q_driver_lt_0_1[_MSIHexcluded].tsv
+   output/merged_mutation_drivers/<cohort>_significant_genes_not_in_ensGene[_MSIHexcluded].tsv
+   ```
+
+   上記の`[_MSIHexcluded]`は説明上の任意suffixであり、実ファイル名では空文字または`_MSIHexcluded`となる。
+
+最終候補をglobal testで限定する場合は、3のファイルに対して`q_driver < 0.1`を追加適用する。
 
 ---
 

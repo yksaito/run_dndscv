@@ -84,6 +84,11 @@ merged <- map_dfr(input_files, function(input_file) {
 
   result %>%
     mutate(
+      analysis_type = if_else(
+        str_ends(cohort, "_MSIHexcluded"),
+        "MSIHexcluded",
+        "normal"
+      ),
       cohort = cohort,
       q_driver = .env$q_driver,
       q_driver_source = .env$q_driver_column,

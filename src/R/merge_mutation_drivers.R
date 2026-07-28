@@ -1,5 +1,8 @@
-# q_driver < 0.1の遺伝子に該当するANNOVAR変異をcohortごとに統合する
-library(data.table)
+# q_driver < 0.1の遺伝子に該当するANNOVAR変異をcohort・解析種別ごとに統合する
+suppressPackageStartupMessages(library(data.table))
+
+script_version <- "1.2"
+cat("merge_mutation_drivers.R version", script_version, "\n")
 
 options(readr.num_threads = 1)
 Sys.setenv(VROOM_THREADS = 1)
@@ -17,9 +20,13 @@ if (length(args) != 1L) {
 
 sheet_file <- normalizePath(args[[1]], mustWork = TRUE)
 manifest_id <- sub("_manifest\\.txt$", "", basename(sheet_file))
+is_msi_h_excluded <- grepl("_MSIHexcluded$", manifest_id)
+cohort <- sub("_MSIHexcluded$", "", manifest_id)
+analysis_type <- if (is_msi_h_excluded) "MSIHexcluded" else "normal"
 
 cat("Processing manifest:", sheet_file, "\n")
-cat("Cohort:", manifest_id, "\n")
+cat("Cohort:", cohort, "\n")
+cat("Analysis type:", analysis_type, "\n")
 
 mutation_base_dir <-
   "/home/nh1sy/analysis/wgs/3_mutation/pon_filtering/output/final"
@@ -29,8 +36,8 @@ dndscv_file <- file.path(
 out_dir <- file.path("output", "merged_mutation_drivers")
 target_chrs <- paste0("chr", c(1:22, "X", "Y"))
 
-if (!file.exists(dndscv_file)) {
-  stop("Error: dNdScv result was not found: ", dndscv_file)
+if (!file.exists(dndscv_file) || file.info(dndscv_file)$size == 0L) {
+  stop("Error: dNdScv result was not found or is empty: ", dndscv_file)
 }
 
 samplesheet <- fread(
@@ -90,10 +97,24 @@ if (length(missing_dndscv_cols) > 0L) {
   )
 }
 
-q_driver_column <- if ("qglobal_cv" %in% names(dndscv_result)) {
-  "qglobal_cv"
+if ("qglobal_cv" %in% names(dndscv_result)) {
+  missing_indel_cols <- setdiff(c("wind_cv", "qind_cv"), names(dndscv_result))
+  if (length(missing_indel_cols) > 0L) {
+    stop(
+      "Error: qglobal_cv is present but indel column(s) are missing in ",
+      dndscv_file, ": ", paste(missing_indel_cols, collapse = ", ")
+    )
+  }
+  q_driver_column <- "qglobal_cv"
 } else {
-  "qallsubs_cv"
+  unexpected_indel_cols <- intersect(c("wind_cv", "qind_cv"), names(dndscv_result))
+  if (length(unexpected_indel_cols) > 0L) {
+    stop(
+      "Error: qglobal_cv is missing but indel column(s) are present in ",
+      dndscv_file, ": ", paste(unexpected_indel_cols, collapse = ", ")
+    )
+  }
+  q_driver_column <- "qallsubs_cv"
 }
 
 q_driver_numeric <- suppressWarnings(
@@ -164,17 +185,18 @@ match_driver_genes <- function(x, drivers) {
 
 dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 
+suffix <- if (is_msi_h_excluded) "_MSIHexcluded" else ""
 mutation_out <- file.path(
   out_dir,
-  paste0(manifest_id, "_merged_mutation_drivers.txt")
+  paste0(cohort, "_merged_mutation_drivers", suffix, ".txt")
 )
 gene_out <- file.path(
   out_dir,
-  paste0(manifest_id, "_significant_genes_q_driver_lt_0_1.tsv")
+  paste0(cohort, "_significant_genes_q_driver_lt_0_1", suffix, ".tsv")
 )
 missing_gene_out <- file.path(
   out_dir,
-  paste0(manifest_id, "_significant_genes_not_in_ensGene.tsv")
+  paste0(cohort, "_significant_genes_not_in_ensGene", suffix, ".tsv")
 )
 
 mutation_tmp <- paste0(mutation_out, ".tmp_", Sys.getpid())
@@ -213,7 +235,6 @@ for (i in seq_along(mutation_paths)) {
   }
 
   if (is.null(expected_annovar_cols)) {
-    # data.tableの:=による列追加でnames(dt)の参照先が更新されないようcopyする
     expected_annovar_cols <- copy(names(dt))
   } else if (!identical(names(dt), expected_annovar_cols)) {
     stop("Error: ANNOVAR column structure differs in ", path)
