@@ -225,7 +225,7 @@ output/manifest_lists/dndscv_CODE_MSIHexcluded_YYYYMMDD_HHMMSS.txt
 各manifest行について、次のファイルを参照する。
 
 ```text
-/home/nh1sy/analysis/wgs/3_mutation/pon_filtering/output/final/<CODE>/<tumor_sample_name>.filtered.hg38_multianno.txt.gz
+/home/nh1sy/analysis/wgs/3_mutation/pon_filtering/output/final_phased_local_dedup/<CODE>/<tumor_sample_name>.filtered.hg38_multianno.txt.gz
 ```
 
 必要なANNOVAR列は以下である。
@@ -538,7 +538,7 @@ categoryは`CODE`、`level1`～`level5`から指定できる。省略時は全ca
 - `output/manifest/<cohort>_manifest.txt`
 - `output/manifest/<cohort>_MSIHexcluded_manifest.txt`
 - 対応する`output/dndscv/sel_cv_<cohort>.csv`または`sel_cv_<cohort>_MSIHexcluded.csv`
-- `/home/nh1sy/analysis/wgs/3_mutation/pon_filtering/output/final/<CODE>/<sample>.filtered.hg38_multianno.txt.gz`
+- `/home/nh1sy/analysis/wgs/3_mutation/pon_filtering/output/final_phased_local_dedup/<CODE>/<sample>.filtered.hg38_multianno.txt.gz`
 
 ### 遺伝子の選択と照合
 

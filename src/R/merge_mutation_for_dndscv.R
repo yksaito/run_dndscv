@@ -17,7 +17,7 @@ if (length(args) != 1L) {
 sheet_file <- normalizePath(args[[1]], mustWork = TRUE)
 cat("Processing manifest:", sheet_file, "\n")
 
-mutation_base_dir <- "/home/nh1sy/analysis/wgs/3_mutation/pon_filtering/output/final"
+mutation_base_dir <- "/home/nh1sy/analysis/wgs/3_mutation/pon_filtering/output/final_phased_local_dedup"
 out_base_dir <- file.path("output", "merged_mutation")
 dir.create(out_base_dir, recursive = TRUE, showWarnings = FALSE)
 

@@ -18,7 +18,7 @@ sheet_file <- normalizePath(args[[1]], mustWork = TRUE)
 cat("Processing manifest:", sheet_file, "\n")
 
 # 入出力設定
-mutation_base_dir <- "/home/nh1sy/analysis/wgs/3_mutation/pon_filtering/output/final"
+mutation_base_dir <- "/home/nh1sy/analysis/wgs/3_mutation/pon_filtering/output/final_phased_local_dedup"
 target_chrs <- paste0("chr", c(1:22, "X", "Y"))
 
 samplesheet <- fread(

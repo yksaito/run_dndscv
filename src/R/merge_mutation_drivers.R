@@ -29,7 +29,7 @@ cat("Cohort:", cohort, "\n")
 cat("Analysis type:", analysis_type, "\n")
 
 mutation_base_dir <-
-  "/home/nh1sy/analysis/wgs/3_mutation/pon_filtering/output/final"
+  "/home/nh1sy/analysis/wgs/3_mutation/pon_filtering/output/final_phased_local_dedup"
 dndscv_file <- file.path(
   "output", "dndscv", paste0("sel_cv_", manifest_id, ".csv")
 )
